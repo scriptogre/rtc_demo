@@ -340,18 +340,29 @@ one core; WS baseline 16,150):
 | 10 | 63,185 | 3.9x |
 | 20 | 92,222 | 5.7x |
 
-**So ±10% is reached at ~2 signals/POST, and exceeded from 3 up.** The deep
-reason: amortize the per-message transport cost and both transports converge to
-the same app-work floor (~11 µs/signal here for `_do_signal`); the frame-vs-request
-difference only exists *per message*. (WS can batch too, but its per-frame cost is
-already small, so it has less to gain — which is why batched SSE catches and
-passes it.)
+**±10% is reached at ~2 signals/POST and exceeded from 3 up — but see the fairness
+note below before reading this as parity.** The deep reason it works: amortize the
+per-message transport cost and both transports converge to the same app-work floor
+(~11 µs/signal here for `_do_signal`); the frame-vs-request difference only exists
+*per message*.
 
-**What it costs / when it's honest:** batching trades a little latency for
-throughput (you accumulate signals for a few ms before sending). For WebRTC
-signalling this is a natural fit — ICE candidates arrive in bursts and batch
-cleanly; the latency-sensitive singletons (SDP offer/answer) are rare and can go
-unbatched. It's still standard SSE + HTTP POST, just a richer body — not a hack.
+**Is batching a FAIR comparison? No — read it carefully.** Batching is not
+something SSE+POST has that WS lacks; WS can batch N signals per frame too. It
+*looks* decisive only because the per-message overhead it amortizes is large for a
+POST (~95 µs) and tiny for a frame — so it helps SSE+POST a lot and WS little. In a
+fair fight (batch both, or neither) WS stays ahead at 1:1, and at large N both
+converge to the same app-work floor (~11 µs/signal) because the transport overhead
+amortizes away for *any* transport. So "batched SSE+POST beats WS" compares an
+optimized config to an unoptimized one — it proves the overhead is amortizable, not
+that the protocols are at parity.
+
+**What it costs / when it's realistic:** batching trades a little latency for
+throughput (accumulate for a few ms before sending). For signalling it's a partial
+fit — ICE candidates arrive in bursts and coalesce cleanly with a short timer; SDP
+offer/answer are latency-critical singletons you would not batch. It's still
+standard SSE + HTTP POST, just a richer body. But for *this* workload you never
+need it: unbatched 1:1 already does ~9.5k signals/s/core (~950 call-setups/s/core),
+far above bursty signalling, so throughput-per-core is never the binding constraint.
 
 **Verdict:** within ±10% of WS throughput-per-core is achievable, and beatable,
 with small (2-3) signal batches. At strict 1:1 messaging it is not possible in a
