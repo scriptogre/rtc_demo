@@ -1,0 +1,5 @@
+# Benchmark-only deps (NOT needed to run the app). Install into the same venv:
+#   uv pip install -r benchmark/requirements.txt
+httpx==0.27.2
+websockets==13.1
+psutil==6.0.0
