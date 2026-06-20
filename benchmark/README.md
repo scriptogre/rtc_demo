@@ -374,6 +374,44 @@ EventSource for the downlink) — that removes per-message request overhead
 entirely, but needs `fetch` upload streaming (Chrome/h2 only today), so it trades
 portability for parity.
 
+## HTTP/3 on a fast (Go) server — measured
+
+To remove the Python server as a variable, ran a Go server (Caddy) doing pure
+`respond 204`, pinned to one core, hammered by native clients (bombardier for
+h1/h2, a quic-go client `/tmp/h3load` for h3 — both fast, non-bottlenecking).
+All single-core:
+
+| stack (1 core, POST→204 or equivalent) | req/s |
+|---|---|
+| Caddy (Go) raw 204, **h1.1** | 21,527 |
+| Caddy (Go) raw 204, **h3 (QUIC)** | ~18,000 |
+| Caddy (Go) raw 204, **h2** | 14,915 |
+| WS (Python `ws_consumer`, full round-trip) | 16,150 |
+| uvicorn (Python) raw GET | 12,910 |
+| uvicorn (Python) full POST `/fast/signal` | 10,000 |
+
+**HTTP/3 is not cheaper per request — it's slower than h1.1.** On the same fast Go
+server, h3 (~18k) sits between h2 (15k) and h1.1 (21.5k). QUIC runs the transport
+in userspace with per-packet crypto, pacing, and stream management — that CPU
+offsets the smaller frame. So the "h3 frame ≈ WS message" intuition is right on the
+*wire* but wrong on *cost*: the bottleneck is CPU, and h3 adds CPU. h1.1 is the
+fastest HTTP version here.
+
+**A faster server roughly doubles the raw request ceiling (Go 21.5k vs Python
+13k), but that's a language difference, not a protocol one — and it still doesn't
+beat the structural frame-vs-request gap.** Same-language proof: on Python,
+WS (16.1k, full round-trip) > a *trivial* uvicorn GET (12.9k) > the full POST
+(10k). A WebSocket message is cheaper than even an empty HTTP GET on the same
+server, because after connect it has no per-message request lifecycle. Put the
+signalling app in Go/Rust and both WS and POST rise together; the ~1.3-1.7x
+frame-vs-request ratio persists.
+
+**So a powerful h3 server does not get one-POST-per-message SSE close to WS.** The
+only levers remain: amortize the request (batch — measured above) or drop the
+request model (WebTransport over h3 — streams/datagrams, no per-request
+lifecycle). h3 by itself, one POST per message, is if anything a small step
+backward from h1.1.
+
 ## On HTTP/3 framing vs WebSocket framing
 
 True on the wire: an h3 POST's framing can be nearly as small as a WS frame. h1.1
