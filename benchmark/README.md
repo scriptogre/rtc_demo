@@ -190,6 +190,46 @@ hypercorn benchmark.asgi:application --bind 127.0.0.1:8443 --certfile cert.pem -
 python -m benchmark.rtt --transport sse-fast --url https://127.0.0.1:8444 --conc 1
 ```
 
+## Does the gap survive a real network?
+
+Loopback has ~0 RTT, which makes a 1 ms server-side difference look enormous. To
+see real-world behaviour, `benchmark/netsim.py` puts a propagation delay in the
+path (a transparent L4 relay; ~50 ms RTT here) and `rtt.py --burst K` models a
+call-setup burst of K signals (SDP + ICE) fired at once. Self round-trip, p50:
+
+| | loopback (~0 RTT) | **+50 ms RTT** |
+|---|---|---|
+| WS, per message            | 0.38 | **52.0** |
+| SSE+POST h1.1, per message | 1.44 | **53.7** |
+| SSE+POST h2, per message   | 2.07 | **54.9** |
+| WS, call-setup burst×10            | 1.1  | 53.0 |
+| SSE+POST h1.1, burst×10            | 18.6 | 66.3 |
+| SSE+POST h2,   burst×10            | 12.7 | 66.5 |
+
+**Findings:**
+- **Per-message latency: the gap collapses.** Loopback 0.38 vs 1.44 ms looks like
+  4×; under a real 50 ms RTT it's 52.0 vs 53.7 ms — a ~3% difference, imperceptible.
+  The transport no longer decides latency; the network does. WS does **not**
+  dominate latency in real-world usage for this workload.
+- **Call-setup burst: a residual ~13 ms** (66 vs 53 ms), because 10 POSTs cost
+  ~13 ms of serialized per-request server work where 10 frames cost ~0. It happens
+  once per call and is humanly invisible next to RTT. (h1.1 and h2 are equal here
+  once connections are warm — h2's win is connection *count*, not this latency.)
+
+**Caveat — what this does NOT cover:** the proxy models propagation delay only,
+not **packet loss** (a byte relay can't drop packets without breaking TCP, and
+this container has no `netem` kernel module). Loss is the one regime where the
+transport genuinely matters: on a single connection (WS, or h2 multiplexing the
+stream + POSTs) a lost segment head-of-line-blocks everything until retransmit;
+h1.1's separate stream/POST connections isolate it; HTTP/3 (QUIC) avoids TCP HOL
+per-stream. To test that you need real `netem` (`tc qdisc add dev <if> root netem
+delay 25ms loss 1%`) on a host where the module is available, or two real boxes.
+
+**Bottom line:** over a real network, optimized SSE+POST is within a couple ms of
+WebSocket for signalling — indistinguishable to users. WS's real edges are
+throughput-per-core at high message rates and behaviour under packet loss,
+neither of which bursty WebRTC signalling exercises.
+
 ## What this does and does NOT compare
 
 - **Does:** in-process WS vs in-process SSE+POST — a clean *transport* A/B. The
