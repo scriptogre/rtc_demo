@@ -2,12 +2,12 @@
 {% load static %}
 {% block page_scripts %}
 <script src="{% static 'lib/htmx.org/dist/htmx.js' %}"></script>
-<script src="{% static 'lib/htmx.org/dist/ext/ws.js' %}"></script>
+<script src="{% static 'lib/htmx.org/dist/ext/hx-sse.js' %}"></script>
 <script src="{% static 'js/tr.js' %}"></script>
 <script src="{% static 'lib/adapter/adapter-latest.js' %}"></script>
 {% endblock page_scripts %}
 {% block app_content %}
-<div id="websocket-div" ws-connect="/ws/lobby/" hx-ext="tr-ext, ws">
+<div id="websocket-div" hx-sse:connect="/sse/lobby/" hx-swap="none">
   <main class="videoContent">
     <div id="videos" class="row">
       <div class="col-sm-4 col-md-3 col-lg-3 col-xl-2">
