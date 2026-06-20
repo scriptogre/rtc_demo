@@ -287,89 +287,91 @@ into RTT on a real link.
 Server pinned to one core (`taskset -c 0`), load from the other cores, throughput
 read from an authoritative server-side counter (`/fast/stats`).
 
-First attempt with the httpx/websockets load-gen was misleading: it couldn't
-saturate the SSE server core (only 52%), because a `fetch`/httpx POST is far
-heavier *client*-side than a WS frame. Computing per-signal CPU at 52% util gave a
-wrong ~214 µs and a wrong "3.5x". A raw, socket-level pipelining blaster
-(`benchmark/rawblast.py`) **does** saturate the server, so these are real,
-server-bound numbers:
+This figure was corrected twice (the process matters):
 
-| transport (full round-trip, 1 core saturated) | signals/s | **per-signal CPU** |
+1. First attempt (httpx/websockets load-gen) couldn't saturate the SSE core (52%);
+   per-signal CPU at partial util gave a wrong ~214 µs / "3.5x".
+2. A raw socket blaster (`rawblast.py`) saturated it → ~104 µs / "1.7x". But that
+   still had uvicorn's **default per-request access logging on** — a `stderr`
+   write + formatting *every POST*, which py-spy showed was ~half the cost. **WS
+   never pays this** (it logs the handshake once, not each frame), so it was an
+   unfair handicap.
+3. Fair run (`--no-access-log --no-proxy-headers`; WS is unaffected, it has no
+   per-message logging):
+
+| full round-trip, 1 core saturated, no per-message logging | signals/s | per-signal |
 |---|---|---|
-| **WS**                          | 16,150 | **~60 µs** |
-| **SSE+POST** (POST in + SSE out) | 9,480 | **~104 µs** |
-| *SSE+POST, ingestion only (no delivery)* | 10,400 | *~95 µs* |
+| **WS**                              | 16,150 | ~60 µs |
+| **SSE+POST** (POST in + SSE out)    | **11,702** | ~80 µs |
+| *SSE+POST, ingestion only (one leg)* | 22,373 | ~44 µs |
 
-**Corrected finding: WS wins throughput-per-core by ~1.7x (≈104 vs 60 µs/signal),
-not 3.5x.** And the split is informative: **SSE delivery is nearly free (~10 µs)** —
-the whole gap is the cost of handling an HTTP *request* per message (parse + ASGI
-`http.request`/`http.response` events + response build, ~95 µs) versus a WS frame
-(~60 µs round-trip). That ~44 µs is the irreducible "HTTP-per-message" tax in a
-Python ASGI stack; a frame just carries less machinery.
+**Corrected finding: the fair gap is ~1.35x (≈80 vs 60 µs/signal), not 1.7x and
+certainly not 3.5x.** Per leg: the SSE *downlink* (server→client stream write) is
+nearly frame-cheap (~36 µs); the POST *uplink* is the heavier leg (~44 µs) because
+each is a full HTTP request. py-spy on the saturated POST path: only ~10% of CPU
+is the actual signalling (`_do_signal`, json, our handler); ~90% is request
+plumbing — event-loop scheduling across the per-request awaits (~18%), HTTP parse
++ scope construction (~11%), response serialize + completion (~11%), and the
+removable access-log/proxy-headers (~halved throughput when on). The irreducible
+remainder (~20 µs over a frame) is the request lifecycle: a fresh scope, extra
+event-loop hops, parse+serialize — which a long-lived WS connection amortizes.
 
-So the real protocol limit, best case: **optimized SSE+POST sustains ~9,500
-signals/s/core vs WebSocket ~16,000 — within ~1.7x.** For context that's ~950
-WebRTC call-setups/sec/core (a call setup is ~10 messages), then silence — orders
-of magnitude above what bursty signalling needs. The 1.7x only bites for
-*sustained* high-rate streams (game state, cursors, telemetry). Honest caveat:
-all single-box; the WS ceiling is a true saturation point, the SSE ceiling too
-(raw blaster saturated it) — but a faster framework (Go/Rust) would lower both.
+So the real limit, best case: **~11,700 signals/s/core vs WS ~16,000 — within
+~1.35x.** That's ~1,170 WebRTC call-setups/sec/core, then silence — orders of
+magnitude above what bursty signalling needs; the gap only bites for *sustained*
+high-rate streams. Caveat: single-box; both are true saturation points; a Go/Rust
+framework lowers both (the frame-vs-request ratio persists).
 
 ## Can SSE+POST get within ±10% of WS? (yes — what it takes)
 
-Validated the ingestion ceiling with three off-the-shelf tools (no custom code):
-bombardier 10,323, oha 10,254, h2load — all agree with `rawblast.py` (~10.4k),
-so the ~10k/s figure is solid.
+All numbers below are fair (no per-message logging on either side).
 
-**One signal per POST cannot reach ±10%.** It's ~1.7x WS (≈9.5k full round-trip
-vs 16k) because an HTTP *request* is structurally heavier than a frame: a new ASGI
-scope, three event crossings (`http.request` / `http.response.start` /
-`http.response.body`), and status+header serialization — every message. No HTTP
-server removes that; a faster runtime (Go/Rust) lowers it but lowers WS too, so
-the ratio largely persists.
+**One signal per POST is ~1.35x WS on full round-trip (11.7k vs 16.1k) — just
+outside ±10%.** The uplink POST is the heavier leg (~44 µs vs a ~30 µs frame leg);
+the SSE downlink is already frame-cheap. The residual is the HTTP request
+lifecycle (fresh scope, extra event-loop hops, parse+serialize) a long-lived
+WS connection amortizes. A faster runtime (Go/Rust) lowers it but lowers WS too.
 
-**The lever is amortization: put N signals in one POST** (a JSON array). The
-per-request cost is paid once per N. Measured (bombardier, signals/s = reqs/s x N,
-one core; WS baseline 16,150):
+**The lever is amortization: put N signals in one POST** (a JSON array), which
+pays the per-request cost once per N. Measured ingestion (bombardier, no logging,
+signals/s = reqs/s x N, one core; WS full-round-trip baseline 16,150):
 
-| signals per POST | signals/s/core | vs WS |
+| signals per POST | uplink signals/s | full round-trip (uplink/N + ~36µs downlink) |
 |---|---|---|
-| 1  |  9,873 | 0.61x |
-| 3  | 24,943 | **1.54x** |
-| 5  | 40,210 | 2.5x |
-| 10 | 63,185 | 3.9x |
-| 20 | 92,222 | 5.7x |
+| 1  | 21,916 | ~11,700  (0.73x WS) |
+| 2  | 38,402 | ~17,000  (~1.05x — within ±10%) |
+| 3  | 52,919 | ~19,600  (1.2x) |
+| 5  | 70,309 | ~22,000  (1.4x) |
+| 10 | 100,132 | ~26,000 (1.6x) |
 
-**±10% is reached at ~2 signals/POST and exceeded from 3 up — but see the fairness
-note below before reading this as parity.** The deep reason it works: amortize the
-per-message transport cost and both transports converge to the same app-work floor
-(~11 µs/signal here for `_do_signal`); the frame-vs-request difference only exists
-*per message*.
+**±10% on the full round-trip is reached at ~2 signals/POST.** (Uplink-only — i.e.
+ingestion — already beats WS at N=1, 1.36x, but a fair signal needs delivery too,
+hence the round-trip column.) The deep reason: amortize the per-message transport
+cost and both transports converge to the app-work floor (~11 µs/signal); the
+frame-vs-request difference only exists *per message*.
 
-**Is batching a FAIR comparison? No — read it carefully.** Batching is not
-something SSE+POST has that WS lacks; WS can batch N signals per frame too. It
-*looks* decisive only because the per-message overhead it amortizes is large for a
-POST (~95 µs) and tiny for a frame — so it helps SSE+POST a lot and WS little. In a
-fair fight (batch both, or neither) WS stays ahead at 1:1, and at large N both
-converge to the same app-work floor (~11 µs/signal) because the transport overhead
-amortizes away for *any* transport. So "batched SSE+POST beats WS" compares an
-optimized config to an unoptimized one — it proves the overhead is amortizable, not
-that the protocols are at parity.
+**Is batching a FAIR comparison? No — read it carefully.** Batching isn't
+something SSE+POST has that WS lacks; WS can batch per frame too. It *looks*
+decisive only because the per-message overhead it amortizes is large for a POST
+(a full request) and tiny for a frame — so it helps SSE+POST a lot and WS little.
+Batch both, or neither, and WS stays ahead at 1:1 while at large N both converge
+to the app-work floor. So "batched SSE+POST beats WS" is optimized-vs-unoptimized,
+not parity — it proves the overhead is amortizable, which is true for any transport.
 
 **What it costs / when it's realistic:** batching trades a little latency for
 throughput (accumulate for a few ms before sending). For signalling it's a partial
 fit — ICE candidates arrive in bursts and coalesce cleanly with a short timer; SDP
 offer/answer are latency-critical singletons you would not batch. It's still
 standard SSE + HTTP POST, just a richer body. But for *this* workload you never
-need it: unbatched 1:1 already does ~9.5k signals/s/core (~950 call-setups/s/core),
+need it: unbatched 1:1 already does ~11.7k signals/s/core (~1,170 call-setups/s/core),
 far above bursty signalling, so throughput-per-core is never the binding constraint.
 
-**Verdict:** within ±10% of WS throughput-per-core is achievable, and beatable,
-with small (2-3) signal batches. At strict 1:1 messaging it is not possible in a
-Python ASGI stack (~1.7x floor) — but that floor is ~9.5k signals/s/core (~950
-WebRTC call-setups/s/core), already far beyond what bursty signalling needs, and
-latency is a tie on a real network regardless. A batch-free route to parity would
-be a streaming request body (one long-lived POST carrying framed signals,
+**Verdict:** ±10% of WS throughput-per-core needs only ~2 signals/POST; strict 1:1
+lands at ~1.35x (≈11.7k vs 16.1k) — a real but small floor from the HTTP request
+lifecycle, and already ~1,170 call-setups/s/core, far beyond what bursty signalling
+needs (and latency is a tie on a real network regardless). A batch-free route to
+parity would be a streaming request body (one long-lived POST carrying framed
+signals,
 EventSource for the downlink) — that removes per-message request overhead
 entirely, but needs `fetch` upload streaming (Chrome/h2 only today), so it trades
 portability for parity.
@@ -381,14 +383,13 @@ To remove the Python server as a variable, ran a Go server (Caddy) doing pure
 h1/h2, a quic-go client `/tmp/h3load` for h3 — both fast, non-bottlenecking).
 All single-core:
 
-| stack (1 core, POST→204 or equivalent) | req/s |
+| stack (1 core, POST→204 or equivalent, no per-msg logging) | req/s |
 |---|---|
 | Caddy (Go) raw 204, **h1.1** | 21,527 |
+| uvicorn (Python) POST `/fast/signal` (one leg) | 21,916 |
 | Caddy (Go) raw 204, **h3 (QUIC)** | ~18,000 |
-| Caddy (Go) raw 204, **h2** | 14,915 |
 | WS (Python `ws_consumer`, full round-trip) | 16,150 |
-| uvicorn (Python) raw GET | 12,910 |
-| uvicorn (Python) full POST `/fast/signal` | 10,000 |
+| Caddy (Go) raw 204, **h2** | 14,915 |
 
 **HTTP/3 is not cheaper per request — it's slower than h1.1.** On the same fast Go
 server, h3 (~18k) sits between h2 (15k) and h1.1 (21.5k). QUIC runs the transport
@@ -397,14 +398,14 @@ offsets the smaller frame. So the "h3 frame ≈ WS message" intuition is right o
 *wire* but wrong on *cost*: the bottleneck is CPU, and h3 adds CPU. h1.1 is the
 fastest HTTP version here.
 
-**A faster server roughly doubles the raw request ceiling (Go 21.5k vs Python
-13k), but that's a language difference, not a protocol one — and it still doesn't
-beat the structural frame-vs-request gap.** Same-language proof: on Python,
-WS (16.1k, full round-trip) > a *trivial* uvicorn GET (12.9k) > the full POST
-(10k). A WebSocket message is cheaper than even an empty HTTP GET on the same
-server, because after connect it has no per-message request lifecycle. Put the
-signalling app in Go/Rust and both WS and POST rise together; the ~1.3-1.7x
-frame-vs-request ratio persists.
+**Language barely matters for the request itself — it was the *access logging*.**
+Once per-message logging is off, Python uvicorn's POST (21.9k, one leg) is right
+alongside Caddy's Go raw 204 (21.5k). The earlier "Go ~2x Python" was the logging
+artifact (default uvicorn `stderr`-per-request was ~half the cost), not the
+runtime. The real structural cost is the request *lifecycle*: same-language proof,
+a full SSE+POST round-trip (~80 µs) > a WS round-trip (~60 µs) because the POST
+re-creates a scope + runs extra event-loop hops + parse/serialize each message,
+which a long-lived WS connection amortizes. That ~1.35x is the floor.
 
 **So a powerful h3 server does not get one-POST-per-message SSE close to WS.** The
 only levers remain: amortize the request (batch — measured above) or drop the
@@ -420,10 +421,10 @@ warmup the per-request header bytes shrink to almost nothing, and a WebTransport
 datagram is tiny (a few bytes), ~a WS frame's 2-14.
 
 But that is *wire bytes*, and wire bytes were never our bottleneck — on localhost
-bombardier moved ~3 MB/s, nowhere near a limit. The ~95 µs/POST ceiling is **server
-CPU in the HTTP request lifecycle**: a fresh ASGI scope, three event crossings
-(`http.request` / `response.start` / `response.body`), the Python await machinery,
-response serialization. QPACK shrinks header *parsing* (a few µs of the 95), but
+bombardier moved a few MB/s, nowhere near a limit. The ~44 µs/POST uplink cost is
+**server CPU in the HTTP request lifecycle**: a fresh ASGI scope, three event
+crossings (`http.request` / `response.start` / `response.body`), the Python await
+machinery, response serialization. QPACK shrinks header *parsing* (a few µs), but
 the request-lifecycle cost is transport-agnostic and dominates — so smaller h3
 frames do not close the throughput-per-core gap for one-POST-per-message. Measured
 direction agrees: h2/h3 were *slower* per message than h1.1 (HPACK/QPACK decode +
