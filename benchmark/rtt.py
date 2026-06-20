@@ -155,4 +155,5 @@ async def main():
     print(f"{args.transport:9s} {proto:8s} burst={args.burst:<3d} conc={args.conc:<2d} "
           f"n={len(lat):4d}  p50={p(.5):6.2f}  p90={p(.9):6.2f}  p99={p(.99):6.2f} ms  [{label}]")
 
-asyncio.run(main())
+if __name__ == "__main__":
+    asyncio.run(main())

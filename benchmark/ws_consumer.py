@@ -19,6 +19,7 @@ from http.cookies import SimpleCookie
 from asgiref.sync import sync_to_async
 
 from rtc import sse
+from benchmark import fast
 
 
 @sync_to_async
@@ -92,6 +93,7 @@ async def websocket_app(scope, receive, send):
             cmd = msg.get('cmd')
             if cmd == 'signal':
                 await sse._do_signal(channel_id, msg['rtc'])
+                fast.signals += 1
             elif cmd == 'join':
                 await sse._do_join(channel_id, msg['room'])
             elif cmd == 'hangup':

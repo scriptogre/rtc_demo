@@ -24,6 +24,7 @@ from rtc import sse
 from benchmark.raw_post import _cookie, _read_body, _reply
 
 post_tokens: dict[str, str] = {}   # secret token -> channel_id
+signals = 0                        # benchmark: server-side count of signals handled
 
 
 @sync_to_async(thread_sensitive=False)
@@ -98,4 +99,13 @@ async def post_app(scope, receive, send):
         await _reply(send, 403)
         return
     await sse._do_signal(channel_id, json.loads(await _read_body(receive) or b'{}'))
+    global signals
+    signals += 1
     await _reply(send, 204)
+
+
+async def stats_app(scope, receive, send):
+    body = json.dumps({"signals": signals}).encode()
+    await send({'type': 'http.response.start', 'status': 200,
+                'headers': [(b'content-type', b'application/json')]})
+    await send({'type': 'http.response.body', 'body': body})

@@ -282,6 +282,37 @@ into RTT on a real link.
   here drive h3 against a self-signed local cert, so QUIC-under-loss is argued,
   not measured.
 
+## Throughput per core (measured)
+
+Earlier drafts *claimed* WS wins on throughput-per-core without measuring it.
+Measured now: server pinned to one core (`taskset -c 0`), load driven from the
+other cores by several `benchmark/blast.py` processes, throughput read from an
+authoritative server-side counter (`/fast/stats`), so client-side starvation
+can't skew it (`benchmark/throughput.py` is the single-process variant).
+
+| transport | signals/s (1 core) | server core | **per-signal CPU** |
+|---|---|---|---|
+| **WS**        | 16,150 | 97-102% (saturated) | **~60 µs** |
+| **SSE+POST**  | 2,425* | 52% (load-gen bound) | **~214 µs** |
+
+\* The httpx load generator can't saturate the SSE server core (a `fetch` POST is
+far heavier client-side than a WS frame, and more concurrency just thrashed
+connections). So SSE's *absolute* ceiling is derived from the directly-measured
+per-signal CPU, not a saturation point: ~1 core / 214 µs ≈ **~4,700 signals/s/core**.
+
+**Yes, there is a significant difference: WS costs ~60 µs/signal vs ~214 µs for
+optimized SSE+POST — about 3.5x.** A POST re-pays HTTP request parsing + ASGI
+`http.request`/`http.response` events + response build every message; a frame
+doesn't. So WS sustains ~3.5x the signalling rate per core (~16k vs ~4.7k/s).
+
+**Context that matters for the thesis:** even ~4,700 signals/s/core is huge for
+this workload — a WebRTC call setup is ~10 messages, so that's ~450 call-setups
+per second per core, then silence. The 3.5x only bites for *sustained* high-rate
+streams (live game state, cursors, telemetry), which is exactly the kind of app
+where WS earns its keep — and not what bursty signalling is. Honest caveat: the
+SSE ceiling is CPU-derived (couldn't be driven to saturation here); a
+multi-machine load test would pin the absolute number.
+
 ## What this does and does NOT compare
 
 - **Does:** in-process WS vs in-process SSE+POST — a clean *transport* A/B. The

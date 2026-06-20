@@ -21,6 +21,8 @@ async def application(scope, receive, send):
         path = scope['path']
         if path.startswith('/fast/sse/'):
             await fast.sse_app(scope, receive, send)       # optimized SSE (token, no DB)
+        elif path == '/fast/stats':
+            await fast.stats_app(scope, receive, send)      # benchmark: signals handled
         elif path == '/fast/signal/':
             await fast.post_app(scope, receive, send)       # optimized POST (O(1) token)
         elif path.startswith('/raw/'):
