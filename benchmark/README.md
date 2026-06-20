@@ -86,11 +86,35 @@ Reading it:
 2. **Django's middleware pipeline is the bulk** of the SSE+POST cost (full→lean is
    ~3× latency, ~5× CPU). This is removable: a native-async stack with async
    middleware (Starlette/FastAPI — cf. `scriptogre/hyperspace`) doesn't pay it.
-3. **The lean-vs-WS gap (~12 ms) is the genuine per-request HTTP cost** — request
-   parse + a per-request session read (on sqlite here) + response build, versus a
-   WS frame on an already-authenticated connection. Postgres + a pooled/cookie
-   session + keepalive shrink it; it never reaches WS levels, and that gap *is*
-   the protocol's price.
+3. **The lean-vs-WS gap is mostly queuing, not per-request work.** Drilling in
+   with a single-connection microbench (`/raw/signal/`, no SSE-delivery leg):
+
+   | concurrency | lean POST round-trip p50 | min |
+   |---|---|---|
+   | 1  | 2.6 ms  | 2.2 ms |
+   | 4  | 6.6 ms  | 3.1 ms |
+   | 8  | 12.5 ms | 2.2 ms |
+   | 16 | 22.7 ms | 2.2 ms |
+
+   The **min stays ~2.2 ms at every concurrency** — the work per request is
+   constant; the p50 rises because requests *wait*. uvicorn runs one event loop
+   on one core, and a POST is far more loop-work than a WS frame (HTTP parse +
+   ASGI `http.request`/`http.response` events + a thread-hopped session read +
+   response build), so the POST path saturates that one core at a low rate while
+   featherweight WS frames don't. On this 4-core box the load generator competes
+   for the same cores too. Giving the server 4 workers pulled conc-8 from 12.5 →
+   8.8 ms (only partly, because the single-process load-gen is then the limit) —
+   confirming it's loop/core serialization, not per-message cost.
+
+   So the **irreducible per-message protocol tax is ~1–1.5 ms** (one POST ≈ 2.2 ms
+   of which the sqlite session read is ~0.45 ms; a WS frame ≈ 1 ms end-to-end).
+   The scary "13 ms" was concurrency queuing amplified by a single event loop and
+   by co-locating the load generator with the server — exactly why the rules above
+   say run the load generator off-box and give the server cores. The real ceiling
+   SSE+POST has versus WS is *signals/sec/core* (a POST costs more loop time than a
+   frame), which only bites at rates far above bursty WebRTC signalling. Note the
+   single-process design can't simply add uvicorn workers — the queues are
+   in-process, so a POST and its peer's SSE stream must land in the same worker.
 
 Takeaway for the thesis: SSE+POST is viable. Its irreducible cost is modest
 per-request overhead (tens of ms at low rates) — and WebRTC signalling is bursty
