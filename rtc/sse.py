@@ -3,9 +3,9 @@
 This replaces Ken's Channels WebSocket consumer (rtc/consumers.py).
 
   * Server -> client: one persistent SSE stream per user (GET /sse/<room>/),
-    delivering two event types:
-        event: rtc   -> JSON, dispatched to JS handlers (apps._forward)
-        event: html  -> HTML fragment, swapped into the page by htmx
+    delivering two kinds of message:
+        event: rtc   -> JSON, re-dispatched as a DOM event for JS handlers
+        (unnamed)    -> HTML fragment, auto-swapped into the page by htmx 4
   * Client -> server: three plain POST endpoints that return 204:
         POST /api/signal/  -> forward a signal to a peer  (was {rtc: {...}})
         POST /api/join/    -> join a room                 (was {join: ...})
@@ -18,10 +18,12 @@ connection.
 import asyncio
 import json
 import uuid
+from functools import wraps
 
-from asgiref.sync import sync_to_async
 from django.http import HttpResponse, StreamingHttpResponse
 from django.template.loader import render_to_string
+
+CHANNEL_COOKIE = 'channel_id'
 
 # --- In-process signalling state (protected by a single asyncio.Lock) -------
 state_lock = asyncio.Lock()
@@ -93,19 +95,6 @@ async def _all_but_me(room, channel_id, event_name, data):
             await _enqueue(cid, event_name, data)
 
 
-@sync_to_async
-def _get_channel_id(request, create=False):
-    """Read (or, on first SSE connect, create) the per-user channel_id stored
-    in the session. Session access is sync ORM, so it is wrapped for use from
-    async views."""
-    cid = request.session.get('channel_id')
-    if not cid and create:
-        cid = str(uuid.uuid4())
-        request.session['channel_id'] = cid
-        request.session.save()
-    return cid
-
-
 # --- command handlers (the three POST verbs) --------------------------------
 async def _do_join(channel_id, room_name):
     """Port of RtcConsumer._join."""
@@ -169,17 +158,17 @@ async def _do_hangup(channel_id):
         meta['room'] = None
 
 
-async def _do_signal(channel_id, rtc):
-    """Port of RtcConsumer._rtc."""
-    async with state_lock:
-        recipient = rtc.get('recipient')
-        if recipient:
+async def _do_signal(rtc):
+    """Forward a signal to its named recipient (port of RtcConsumer._rtc).
+
+    ponytail: recipient-only. Ken also had an _all_but_me fallback for signals
+    with no recipient, but the client always names one; re-add that branch here
+    if a room-wide signal is ever needed.
+    """
+    recipient = rtc.get('recipient')
+    if recipient:
+        async with state_lock:
             await _enqueue(recipient, 'rtc', json.dumps({'rtc': rtc}))
-        else:
-            meta = channel_meta.get(channel_id)
-            if meta and meta.get('room'):
-                await _all_but_me(meta['room'], channel_id, 'rtc',
-                                  json.dumps({'rtc': rtc}))
 
 
 # --- views ------------------------------------------------------------------
@@ -190,7 +179,10 @@ async def sse_stream(request, room_name):
     if not user.is_authenticated:
         return HttpResponse(status=403)
 
-    channel_id = await _get_channel_id(request, create=True)
+    # channel_id lives in its own cookie (a public, random routing key -- not
+    # the secret session id). Reading a cookie needs no DB, so the POST handlers
+    # stay sync-clean; reused on reconnects, minted on first connect.
+    channel_id = request.COOKIES.get(CHANNEL_COOKIE) or str(uuid.uuid4())
     user_name = user.first_name or user.username
     queue = asyncio.Queue()
 
@@ -229,6 +221,8 @@ async def sse_stream(request, room_name):
 
     response = StreamingHttpResponse(event_stream(),
                                      content_type='text/event-stream')
+    response.set_cookie(CHANNEL_COOKIE, channel_id,
+                        max_age=86400, samesite='Lax', httponly=True)
     response['Cache-Control'] = 'no-cache'
     response['X-Accel-Buffering'] = 'no'  # disable nginx buffering
     return response
@@ -252,35 +246,34 @@ async def _cleanup(channel_id, queue):
             }))
 
 
-async def api_signal(request):
-    if request.method != 'POST':
-        return HttpResponse(status=405)
-    channel_id = await _get_channel_id(request)
-    if not channel_id:
-        return HttpResponse(status=403)
-    rtc = json.loads(request.body or b'{}')
-    await _do_signal(channel_id, rtc)
-    return HttpResponse(status=204)
+def channel_post(handler):
+    """POST-only endpoint: resolve the caller's channel_id (405/403 otherwise),
+    run `handler(request, channel_id)`, return 204. The 405 guard matters —
+    a GET isn't CSRF-checked, and these mutate state."""
+    @wraps(handler)
+    async def view(request):
+        if request.method != 'POST':
+            return HttpResponse(status=405)
+        channel_id = request.COOKIES.get(CHANNEL_COOKIE)
+        if not channel_id:
+            return HttpResponse(status=403)
+        await handler(request, channel_id)
+        return HttpResponse(status=204)
+    return view
 
 
-async def api_join(request):
-    if request.method != 'POST':
-        return HttpResponse(status=405)
-    channel_id = await _get_channel_id(request)
-    if not channel_id:
-        return HttpResponse(status=403)
-    body = json.loads(request.body or b'{}')
-    room = body.get('room')
+@channel_post
+async def api_signal(request, channel_id):
+    await _do_signal(json.loads(request.body or b'{}'))
+
+
+@channel_post
+async def api_join(request, channel_id):
+    room = json.loads(request.body or b'{}').get('room')
     if room:
         await _do_join(channel_id, room)
-    return HttpResponse(status=204)
 
 
-async def api_hangup(request):
-    if request.method != 'POST':
-        return HttpResponse(status=405)
-    channel_id = await _get_channel_id(request)
-    if not channel_id:
-        return HttpResponse(status=403)
+@channel_post
+async def api_hangup(request, channel_id):
     await _do_hangup(channel_id)
-    return HttpResponse(status=204)
