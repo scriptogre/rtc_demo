@@ -2,6 +2,7 @@
 Django settings for rtc_demo project.
 """
 
+import os
 from pathlib import Path
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
@@ -11,7 +12,8 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 SECRET_KEY = 'django-insecure-apt*tnv=g5f=0a1qtp-s&doqdks*53&ztw***+snqmse^1ymk%'
 
 # SECURITY WARNING: don't run with debug turned on in production!
-DEBUG = True
+# Default True (as Ken shipped it); set DJANGO_DEBUG=0 for benchmarking.
+DEBUG = os.environ.get('DJANGO_DEBUG', '1') != '0'
 
 ALLOWED_HOSTS = ['demo.kww.us', 'localhost', '127.0.0.1']
 CSRF_TRUSTED_ORIGINS = [

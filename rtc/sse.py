@@ -185,6 +185,31 @@ async def _do_signal(channel_id, rtc):
                                   json.dumps({'rtc': rtc}))
 
 
+async def _register(channel_id, user_name, room_name, queue):
+    """Register a connection and enqueue the initial connect + header events
+    (port of RtcConsumer.connect). Shared by the SSE view and the benchmark WS
+    consumer so both transports do identical connect-time work."""
+    async with state_lock:
+        # Idempotent (re)connect: drop any stale room membership left by a
+        # previous connection for this channel_id before re-registering.
+        stale = channel_meta.get(channel_id)
+        if stale and stale.get('room') and stale['room'] in rooms:
+            rooms[stale['room']].discard(channel_id)
+
+        connections[channel_id] = queue
+        channel_meta[channel_id] = {
+            'user_name': user_name,
+            'short_name': _short_name(channel_id),
+            'room': room_name,
+        }
+        rooms.setdefault(room_name, set()).add(channel_id)
+
+        await queue.put(('rtc', json.dumps(
+            {'rtc': {'type': 'connect', 'channel_name': channel_id}})))
+        await queue.put(('html',
+            render_to_string('rtc/header.html', {'room': room_name})))
+
+
 # --- views ------------------------------------------------------------------
 async def sse_stream(request, room_name):
     """Persistent SSE stream. Setup/teardown here replace the consumer's
@@ -198,27 +223,7 @@ async def sse_stream(request, room_name):
     queue = asyncio.Queue()
 
     async def event_stream():
-        # --- connect (port of RtcConsumer.connect) ---
-        async with state_lock:
-            # Idempotent (re)connect: drop any stale room membership left by a
-            # previous connection for this channel_id before re-registering.
-            stale = channel_meta.get(channel_id)
-            if stale and stale.get('room') and stale['room'] in rooms:
-                rooms[stale['room']].discard(channel_id)
-
-            connections[channel_id] = queue
-            channel_meta[channel_id] = {
-                'user_name': user_name,
-                'short_name': _short_name(channel_id),
-                'room': room_name,
-            }
-            rooms.setdefault(room_name, set()).add(channel_id)
-
-            await queue.put(('rtc', json.dumps(
-                {'rtc': {'type': 'connect', 'channel_name': channel_id}})))
-            await queue.put(('html',
-                render_to_string('rtc/header.html', {'room': room_name})))
-
+        await _register(channel_id, user_name, room_name, queue)
         try:
             while True:
                 try:
