@@ -1,33 +1,28 @@
-(function() {
+// SSE event dispatch (replaces the old tr-ext htmx extension + ws heartbeat).
+//
+// htmx 4's hx-sse extension handles the transport: it opens the single
+// streaming connection (hx-sse:connect) and, for every *named* SSE event,
+// re-dispatches it as a DOM event of that name carrying { data, id } in
+// event.detail. *Unnamed* messages are auto-swapped into the DOM (our 'html'
+// fragments, including OOB swaps), so they need no JS here.
+//
+// We only have to handle the 'rtc' event: parse its JSON and fan the typed
+// messages out to the app handlers -- byte-for-byte the same behaviour as
+// Ken's tr-ext transformResponse loop.
 
-	/** @type {import("../htmx").HtmxInternalApi} */
-	var api;
+// Don't pause signalling when a tab is backgrounded; a WebSocket wouldn't,
+// and pausing would look like a disconnect to peers. (Auto-reconnect stays on.)
+htmx.config.sse = { pauseOnBackground: false };
 
-    /* data is the parsed JSON response
-       data.html is the html to add to the page
-    */
-    htmx.defineExtension('tr-ext', {
-        transformResponse : function(text, xhr, elt) {
-            const data = JSON.parse(text);
-            for (var [app, message] of Object.entries(data)) {
-                var event = message.type;
-                apps._forward(app, event, message)
-            }
-            if ('remove' in data) {
-                htmx.remove(htmx.find(data.remove));
-            }
-            if (data.html === undefined) { data.html = ""; };
-            return data.html;
-        }
-    })
-})();
+function handle_rtc_event(event) {
+    const data = JSON.parse(event.detail.data);
+    for (var [app, message] of Object.entries(data)) {
+        apps._forward(app, message.type, message);
+    }
+}
 
-htmx.on('htmx:wsOpen', function(e) {
-    // Send heartbeat at least every 30 seconds
-    setInterval(function() {
-        $self.ws_json({"signal": "hb"});
-    }, 25000 + (Math.random() * 5000) );
-});
+// The 'rtc' CustomEvent bubbles up from the hx-sse:connect element to document.
+document.addEventListener('rtc', handle_rtc_event);
 
 const apps = {
     '_add': function(app, name, target) {

@@ -25,11 +25,26 @@ const $self = {
     media_stream: new MediaStream(),
     media_tracks: {},
     features: { audio: false },
-    ws: null,
-    ws_json: function(data) {
-        this.ws.send(JSON.stringify(data));
-    }
 };
+
+function getCookie(name) {
+    const match = document.cookie.match('(^|;)\\s*' + name + '\\s*=\\s*([^;]+)');
+    return match ? match.pop() : '';
+}
+
+// Client -> server transport. Replaces $self.ws_json: each signalling command
+// is a plain POST that returns 204. CSRF is enforced by Django middleware, so
+// we send the token from the cookie in the X-CSRFToken header.
+function api_post(url, data) {
+    return fetch(url, {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+            'X-CSRFToken': getCookie('csrftoken'),
+        },
+        body: JSON.stringify(data),
+    });
+}
 
 const $others = new Map();
 
@@ -39,13 +54,10 @@ function element_id(id='self') {
 }
 
 function signal(recipient, signal) {
-    $self.ws_json(
-        {  'rtc': {
-            'type': 'signal', 'recipient': recipient,
-            'sender': $self.id, 'signal': signal
-            }
-        }
-    )
+    api_post('/api/signal/', {
+        'type': 'signal', 'recipient': recipient,
+        'sender': $self.id, 'signal': signal
+    });
 };
 
 function connected({channel_name}) {
@@ -310,24 +322,19 @@ function other_track(id) {
     };
 }
 
-htmx.on('htmx:wsOpen', function(e) {
-    $self.ws = e.detail.socketWrapper;
-    $self.ws_json({'room': 'lobby'});
-});
-
 function handleCallButton(event) {
     const call_button = event.target;
     if (call_button.className === 'join') {
         call_button.className = 'leave';
         call_button.innerText = 'Leave Call';
-        if ($self.ws) {
-            $self.ws_json({'join': 'video'});
+        if ($self.id) {
+            api_post('/api/join/', {'room': 'video'});
         }
     } else {
         // Leave the call
         call_button.className = 'join';
         call_button.innerText = 'Join Call';
-        $self.ws_json({'hangup': true});
+        api_post('/api/hangup/', {});
         for (let channel_name of $others.keys()) {
             reset_other(channel_name);
         }
