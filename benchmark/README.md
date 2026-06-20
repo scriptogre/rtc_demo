@@ -230,6 +230,58 @@ WebSocket for signalling — indistinguishable to users. WS's real edges are
 throughput-per-core at high message rates and behaviour under packet loss,
 neither of which bursty WebRTC signalling exercises.
 
+## Under packet loss (connection-level approximation)
+
+`netsim.py <l> <u> <delay> <loss> <rto>` also models loss as an RTO-sized stall
+that, crucially, holds the *one connection's* pipe — so it reproduces the
+structural difference between single-connection transports and h1.1's split
+connections. At +50ms RTT + 2% loss, RTO 200ms (p50 / p99 ms):
+
+| | per-message | call-setup burst×10 |
+|---|---|---|
+| WS                | 52.1 / 252 | 52.9 / 254 (p90) |
+| SSE+POST **h1.1** | 53.3 / 254 | **258 / 463** |
+| SSE+POST **h2**   | 54.6 / 256 | 66.3 / 465 (p90) |
+
+- **Per message: identical.** One message is one round-trip; a loss adds ~RTO to
+  the unlucky ~2% for every transport equally. No transport advantage.
+- **Bursts expose head-of-line blocking — and h2 wins for SSE+POST.** WS and h2
+  use ONE connection: usually fast, occasionally a loss stalls the whole burst
+  (bimodal tail). h1.1 spreads 10 POSTs over ~10 connections and must wait for
+  the *slowest*, so with 2% loss something stalls most of the time → its p50
+  jumps to ~258ms. Counterintuitively, **more connections hurt a synchronized
+  burst.** So for SSE+POST under loss, run it over **HTTP/2** (one multiplexed
+  connection), which tracks WS; HTTP/3/QUIC would do better still (per-stream
+  loss recovery, no shared-connection HOL) but needs an h3 client to measure.
+
+Honest limit: this is a connection-level approximation for sparse traffic, not
+packet-level `netem` (no fast-retransmit, no congestion control, no QUIC). The
+direction it shows is right; exact magnitudes need real `netem` or two boxes.
+
+## Real-browser validation (Playwright)
+
+`browser_rtt.py` drives headless Chromium's actual `EventSource`+`fetch` vs
+`WebSocket` (same self-echo). It matches the httpx/websockets harness, so the
+numbers aren't a client-library artifact:
+
+| (p50) | loopback | +50ms RTT (+2% loss p99) |
+|---|---|---|
+| SSE+POST (browser) | 1.70 | 53.7  (p99 254) |
+| WebSocket (browser)| 0.50 | 52.1  (p99 252) |
+
+Same conclusion as the synthetic probe: a ~1 ms gap on loopback that vanishes
+into RTT on a real link.
+
+## Not testable in this sandbox
+
+- **Two-machine / cross-region RTT** and **production canary/RUM** — need real
+  hosts; the container is single-box with a locked-down network.
+- **Packet-level `netem` loss** — the kernel `sch_netem` module isn't present
+  here; the proxy approximation above stands in, with the caveat noted.
+- **HTTP/3 client** — Caddy serves h3, but neither httpx nor Chromium-headless
+  here drive h3 against a self-signed local cert, so QUIC-under-loss is argued,
+  not measured.
+
 ## What this does and does NOT compare
 
 - **Does:** in-process WS vs in-process SSE+POST — a clean *transport* A/B. The
