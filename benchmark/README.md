@@ -363,6 +363,39 @@ EventSource for the downlink) — that removes per-message request overhead
 entirely, but needs `fetch` upload streaming (Chrome/h2 only today), so it trades
 portability for parity.
 
+## On HTTP/3 framing vs WebSocket framing
+
+True on the wire: an h3 POST's framing can be nearly as small as a WS frame. h1.1
+re-sends fat text headers every request; h2/HPACK and h3/QPACK index them so after
+warmup the per-request header bytes shrink to almost nothing, and a WebTransport
+datagram is tiny (a few bytes), ~a WS frame's 2-14.
+
+But that is *wire bytes*, and wire bytes were never our bottleneck — on localhost
+bombardier moved ~3 MB/s, nowhere near a limit. The ~95 µs/POST ceiling is **server
+CPU in the HTTP request lifecycle**: a fresh ASGI scope, three event crossings
+(`http.request` / `response.start` / `response.body`), the Python await machinery,
+response serialization. QPACK shrinks header *parsing* (a few µs of the 95), but
+the request-lifecycle cost is transport-agnostic and dominates — so smaller h3
+frames do not close the throughput-per-core gap for one-POST-per-message. Measured
+direction agrees: h2/h3 were *slower* per message than h1.1 (HPACK/QPACK decode +
+stream management add CPU); their wins are loss resilience and multiplexing, not
+per-message CPU.
+
+The h3 route that genuinely matches WS per-message cost is **WebTransport**
+(QUIC streams/datagrams): it drops the per-message HTTP request lifecycle entirely
+— one session scope, a receive/send per message, exactly WS's amortized model — so
+the server handles each message frame-cheaply. That can hit WS parity (or better,
+via datagrams). The trade: it's no longer "SSE + POST" (different API, an ASGI
+extension server-side), and browser support is Chrome/Edge today (Firefox behind a
+flag, Safari none) versus SSE+POST's universal reach. Not measured here — this
+sandbox has no h3 client (Caddy serves h3, but httpx/curl/headless-Chromium can't
+drive h3 against the local self-signed cert), so this part is reasoned, not benched.
+
+Bottom line: h3 makes the *frame* small, but not the *request* cheap. To match WS
+throughput-per-core you either amortize the request (batch, measured above) or drop
+the request model (WebTransport) — h3 alone, still doing one POST per message,
+doesn't do it.
+
 ## What this does and does NOT compare
 
 - **Does:** in-process WS vs in-process SSE+POST — a clean *transport* A/B. The
