@@ -1,29 +1,17 @@
-"""
-ASGI config for rtc_demo project.
-
-It exposes the ASGI callable as a module-level variable named ``application``.
-
-For more information on this file, see
-https://docs.djangoproject.com/en/3.2/howto/deployment/asgi/
-"""
-
 import os
-import django
+
+from django.core.asgi import get_asgi_application
 
 os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'rtc_demo.settings')
-django.setup()
 
-from channels.auth import AuthMiddlewareStack
-from channels.routing import ProtocolTypeRouter, URLRouter
-from django.core.asgi import get_asgi_application
-import rtc.routing
+application = get_asgi_application()
 
-application = ProtocolTypeRouter({
-    "http": get_asgi_application(),
-    # Just HTTP for now. (We can add other protocols later.)
-    "websocket": AuthMiddlewareStack(
-        URLRouter(
-            rtc.routing.websocket_urlpatterns
-        )
-    ),
-})
+# When served by a bare ASGI server (uvicorn/granian) instead of Django's
+# runserver, nothing serves the static assets in development. Wrap the app in
+# Django's stock static handler while DEBUG is on. (Pass-through for every
+# non-static path, so the SSE stream is unaffected.)
+from django.conf import settings  # noqa: E402
+
+if settings.DEBUG:
+    from django.contrib.staticfiles.handlers import ASGIStaticFilesHandler
+    application = ASGIStaticFilesHandler(application)

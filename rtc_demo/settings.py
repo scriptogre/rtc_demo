@@ -13,7 +13,7 @@ SECRET_KEY = 'django-insecure-apt*tnv=g5f=0a1qtp-s&doqdks*53&ztw***+snqmse^1ymk%
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = True
 
-ALLOWED_HOSTS = ['demo.kww.us']
+ALLOWED_HOSTS = ['demo.kww.us', 'localhost', '127.0.0.1']
 CSRF_TRUSTED_ORIGINS = [
     'http://127.0.0.1', 'http://localhost', 'http://MSI.local'
 ]
@@ -22,11 +22,8 @@ CSRF_TRUSTED_ORIGINS = [
 
 INSTALLED_APPS = [
     'rtc',
-    'daphne',
-    'channels',
     'crispy_bootstrap5',
     'crispy_forms',
-    'rtc_demo.apps.ChannelsPresence',
     'django.contrib.admin',
     'django.contrib.auth',
     'django.contrib.contenttypes',
@@ -68,15 +65,6 @@ CRISPY_TEMPLATE_PACK = 'bootstrap5'
 
 WSGI_APPLICATION = 'rtc_demo.wsgi.application'
 ASGI_APPLICATION = 'rtc_demo.asgi.application'
-CHANNEL_LAYERS = {
-    'default': {
-        'BACKEND': 'channels_redis.core.RedisChannelLayer',
-        'CONFIG': {
-            "hosts": [('127.0.0.1', 6379)],
-            "capacity": 10000,
-        },
-    },
-}
 
 DATABASES = {
     'default': {
