@@ -7,9 +7,9 @@ This replaces Ken's Channels WebSocket consumer (rtc/consumers.py).
         event: rtc   -> JSON, re-dispatched as a DOM event for JS handlers
         (unnamed)    -> HTML fragment, auto-swapped into the page by htmx 4
   * Client -> server: three plain POST endpoints that return 204:
-        POST /api/signal/  -> forward a signal to a peer  (was {rtc: {...}})
-        POST /api/join/    -> join a room                 (was {join: ...})
-        POST /api/hangup/  -> leave the current room      (was {hangup: ...})
+        POST /signals  -> forward a signal to a peer  (was {rtc: {...}})
+        POST /join     -> join a room                 (was {join: ...})
+        POST /hangup   -> leave the current room      (was {hangup: ...})
 
 All signalling state lives in-process (single process by design); there is no
 Channels layer, no Redis, no DB-backed presence. Presence == an open SSE
@@ -277,17 +277,17 @@ def channel_post(handler):
 
 
 @channel_post
-async def api_signal(request, channel_id):
+async def signals(request, channel_id):
     await _do_signal(channel_id, json.loads(request.body or b'{}'))
 
 
 @channel_post
-async def api_join(request, channel_id):
+async def join(request, channel_id):
     room = json.loads(request.body or b'{}').get('room')
     if room:
         await _do_join(channel_id, room)
 
 
 @channel_post
-async def api_hangup(request, channel_id):
+async def hangup(request, channel_id):
     await _do_hangup(channel_id)

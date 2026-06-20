@@ -17,9 +17,9 @@ implementation vs implementation.
             ─ (unnamed)    (HTML fragment; htmx swaps it OOB) ─
             ─ :ka          (keepalive comment every 25s) ─
 
-   browser  ──── POST /api/signal/ ┐
-            ──── POST /api/join/   ├─▶  Django async views, all return 204
-            ──── POST /api/hangup/ ┘     (CSRF + session auth via middleware)
+   browser  ──── POST /signals ┐
+            ──── POST /join    ├─▶  Django async views, all return 204
+            ──── POST /hangup  ┘     (CSRF + session auth via middleware)
 ```
 
 * **Server → client: SSE.** One persistent `StreamingHttpResponse`
@@ -59,7 +59,7 @@ per-user info Ken read from the `channels_presence` DB tables (`user_name`,
 |----------------------------|-------------------------------------------------------|
 | `connect()`                | SSE view setup (register queue, enqueue connect+header)|
 | `disconnect()`             | `_cleanup()` in the generator's `finally`             |
-| `receive_json` dispatch    | three POST views (`api_signal/join/hangup`)           |
+| `receive_json` dispatch    | three POST views (`signals` / `join` / `hangup`)      |
 | `_join()`                  | `_do_join()`                                           |
 | `_rtc()`                   | `_do_signal()`                                         |
 | `_hangup()`                | `_do_hangup()`                                         |
@@ -77,7 +77,7 @@ per-user info Ken read from the `channels_presence` DB tables (`user_name`,
 * `SSE_NOTES.md` — this file.
 
 **Changed**
-* `rtc_demo/urls.py` — routes for `/sse/<room>/` and `/api/{signal,join,hangup}/`.
+* `rtc_demo/urls.py` — routes for `/sse/<room>/` and `/signals`, `/join`, `/hangup`.
 * `rtc_demo/asgi.py` — the stock `get_asgi_application()`, wrapped in Django's
   `ASGIStaticFilesHandler` while `DEBUG` is on so a bare ASGI server still
   serves the static assets in dev (pass-through for every non-static path).

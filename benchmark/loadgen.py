@@ -90,7 +90,7 @@ class Client:
 
 
 class SseClient(Client):
-    api = "/api"  # set to "/raw" for the lean (no-middleware) POST endpoints
+    lean = False  # True -> the /raw/ (no-middleware) endpoints for the perf ceiling
 
     async def connect(self):
         self._task = asyncio.create_task(self._reader())
@@ -120,10 +120,11 @@ class SseClient(Client):
         })
 
     async def join(self, room):
-        await self._post(f"{self.api}/join/", {"room": room})
+        await self._post("/raw/join/" if self.lean else "/join", {"room": room})
 
     async def send_signal(self, recipient):
-        await self._post(f"{self.api}/signal/", self._signal_body(recipient))
+        await self._post("/raw/signal/" if self.lean else "/signals",
+                         self._signal_body(recipient))
         self.sent += 1
 
 
@@ -189,7 +190,7 @@ async def _spawn(args):
     clients = [cls(i, args.url) for i in range(args.users)]
     if args.transport == "sse" and args.lean:
         for c in clients:
-            c.api = "/raw"
+            c.lean = True
     sem = asyncio.Semaphore(args.connect_concurrency)
 
     async def bring_up(c):

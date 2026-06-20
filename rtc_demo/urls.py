@@ -18,16 +18,16 @@ from django.contrib.auth.views import LogoutView
 from django.urls import path
 
 from rtc.views import index, site_login
-from rtc.sse import sse_stream, api_signal, api_join, api_hangup
+from rtc.sse import sse_stream, signals, join, hangup
 
 urlpatterns = [
     path('', index, name="home"),
     path('login/', site_login, name="login"),
     path('logout/', LogoutView.as_view(), name="logout"),
     path('sse/<str:room_name>/', sse_stream, name="sse"),
-    path('api/signal/', api_signal, name="api_signal"),
-    path('api/join/', api_join, name="api_join"),
-    path('api/hangup/', api_hangup, name="api_hangup"),
+    path('signals', signals, name="signals"),
+    path('join', join, name="join"),
+    path('hangup', hangup, name="hangup"),
     path('admin/', admin.site.urls),
 ]
 

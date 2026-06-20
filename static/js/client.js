@@ -54,7 +54,7 @@ function element_id(id='self') {
 }
 
 function signal(recipient, signal) {
-    api_post('/api/signal/', {
+    api_post('/signals', {
         'type': 'signal', 'recipient': recipient,
         'sender': $self.id, 'signal': signal
     });
@@ -328,13 +328,13 @@ function handleCallButton(event) {
         call_button.className = 'leave';
         call_button.innerText = 'Leave Call';
         if ($self.id) {
-            api_post('/api/join/', {'room': 'video'});
+            api_post('/join', {'room': 'video'});
         }
     } else {
         // Leave the call
         call_button.className = 'join';
         call_button.innerText = 'Join Call';
-        api_post('/api/hangup/', {});
+        api_post('/hangup', {});
         for (let channel_name of $others.keys()) {
             reset_other(channel_name);
         }
