@@ -121,6 +121,75 @@ per-request overhead (tens of ms at low rates) — and WebRTC signalling is burs
 and low-volume, so it lands nowhere near where that cost bites. Just don't
 benchmark it through Django's sync middleware and call that "SSE+POST".
 
+## Getting SSE+POST close to WS, and the HTTP/2 server shootout
+
+The naive Django POST was ~13–38 ms. Three fixes (`benchmark/fast.py`, probed by
+`benchmark/rtt.py` — a self-addressed round-trip) close almost all of it:
+
+1. **Skip Django's middleware** (raw ASGI POST).
+2. **Resolve identity once**, like a WS does: mint a secret capability token at
+   SSE-connect, authenticate POSTs by an **O(1) in-memory token lookup** — no
+   per-request DB read, no `sync_to_async` thread hop.
+3. **uvloop + httptools** (`uvicorn[standard]`).
+
+Self round-trip (this 4-core box, loopback, p50 ms):
+
+| transport / server | conc=1 | conc=8 |
+|---|---|---|
+| **WS** (uvicorn h1.1)                  | 0.35 | 0.87 |
+| SSE+POST optimized, **uvicorn h1.1**   | 1.37 | 7.8  |
+| SSE+POST optimized, uvicorn h1.1 + TLS | 1.46 | —    |
+
+Optimized SSE+POST is **~1.4 ms vs WS ~0.35 ms** — a ~1 ms gap, down from ~13 ms.
+That residual is the irreducible cost of an HTTP request+response vs a single WS
+frame; TLS adds only ~0.1 ms. (At conc=8 the gap widens because each POST is more
+event-loop work than a frame and the single-process load-gen/httpx is itself a
+bottleneck — a throughput-per-core story, not a floor.)
+
+### Which HTTP/2 server is fastest?
+
+ASGI servers that speak HTTP/2: **Granian** (Rust) and **Hypercorn** (asyncio or
+uvloop worker). uvicorn and daphne do **not**. Plus a reverse proxy terminating
+h2 in front of uvicorn (**Caddy** here; nginx/Envoy equivalent). All h2 needs TLS.
+
+Same optimized SSE+POST round-trip, p50 ms:
+
+| HTTP/2 server | conc=1 | conc=8 |
+|---|---|---|
+| **Caddy (h2) → uvicorn**        | **2.01** | **10.9** |
+| **Granian** (native h2)         | 2.10 | 11.2 |
+| Hypercorn (uvloop worker)       | 2.28 | 13.3 |
+| Hypercorn (asyncio worker)      | 2.27 | 13.4 |
+| *(uvicorn h1.1, for reference)* | 1.37 | 7.8  |
+
+**Findings:**
+- **HTTP/2 does not lower per-message latency** — it adds ~0.6 ms of framing
+  overhead over HTTP/1.1 (and that's not TLS; TLS alone is ~0.1 ms). On a fast
+  link, h1.1 wins on raw latency.
+- Among h2 servers, **Caddy→uvicorn ≈ Granian** are fastest; **Hypercorn is
+  slowest**, and its uvloop worker doesn't help. Caddy edges it because the
+  upstream is uvicorn (the fastest h1 server) behind Caddy's efficient Go h2.
+- **HTTP/2's real value for SSE+POST is operational, not latency:** one
+  multiplexed connection carries the EventSource stream *and* the POSTs (vs two
+  on h1.1, and browsers cap ~6 conns/host), no head-of-line blocking across a
+  client's concurrent POSTs, and — with HTTP/3/QUIC (Caddy serves it) —
+  resilience to packet loss on real networks, which loopback can't show.
+
+**Recommendation:** for lowest signalling latency, uvicorn (uvloop+httptools) on
+HTTP/1.1. When you want h2's connection multiplexing for real browsers, put Caddy
+(h2/h3) in front of uvicorn, or use Granian for a single native binary — both
+cost ~0.6 ms vs h1.1, which is irrelevant for bursty WebRTC signalling.
+
+To reproduce the h2 runs you need a cert and the servers:
+```bash
+openssl req -x509 -newkey rsa:2048 -keyout key.pem -out cert.pem -days 1 -nodes -subj "/CN=127.0.0.1"
+openssl pkcs8 -topk8 -nocrypt -in key.pem -out key8.pem            # granian wants PKCS#8
+uvicorn  benchmark.asgi:application --port 8000 --loop uvloop --http httptools          # h1.1
+granian  --interface asgi --http 2 --port 8444 --ssl-certificate cert.pem --ssl-keyfile key8.pem benchmark.asgi:application
+hypercorn benchmark.asgi:application --bind 127.0.0.1:8443 --certfile cert.pem --keyfile key.pem
+python -m benchmark.rtt --transport sse-fast --url https://127.0.0.1:8444 --conc 1
+```
+
 ## What this does and does NOT compare
 
 - **Does:** in-process WS vs in-process SSE+POST — a clean *transport* A/B. The

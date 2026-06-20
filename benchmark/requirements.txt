@@ -1,5 +1,14 @@
 # Benchmark-only deps (NOT needed to run the app). Install into the same venv:
 #   uv pip install -r benchmark/requirements.txt
-httpx==0.27.2
+httpx[http2]==0.27.2
 websockets==13.1
 psutil==6.0.0
+
+# faster ASGI loop + HTTP/1.1 parser for the SSE+POST path
+uvloop==0.22.1
+httptools==0.6.4
+
+# HTTP/2 servers, for the http2 comparison (need a TLS cert; see README)
+hypercorn==0.17.3
+h2==4.1.0
+granian==1.6.1
