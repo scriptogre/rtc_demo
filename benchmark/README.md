@@ -282,36 +282,38 @@ into RTT on a real link.
   here drive h3 against a self-signed local cert, so QUIC-under-loss is argued,
   not measured.
 
-## Throughput per core (measured)
+## Throughput per core (measured — and a correction)
 
-Earlier drafts *claimed* WS wins on throughput-per-core without measuring it.
-Measured now: server pinned to one core (`taskset -c 0`), load driven from the
-other cores by several `benchmark/blast.py` processes, throughput read from an
-authoritative server-side counter (`/fast/stats`), so client-side starvation
-can't skew it (`benchmark/throughput.py` is the single-process variant).
+Server pinned to one core (`taskset -c 0`), load from the other cores, throughput
+read from an authoritative server-side counter (`/fast/stats`).
 
-| transport | signals/s (1 core) | server core | **per-signal CPU** |
-|---|---|---|---|
-| **WS**        | 16,150 | 97-102% (saturated) | **~60 µs** |
-| **SSE+POST**  | 2,425* | 52% (load-gen bound) | **~214 µs** |
+First attempt with the httpx/websockets load-gen was misleading: it couldn't
+saturate the SSE server core (only 52%), because a `fetch`/httpx POST is far
+heavier *client*-side than a WS frame. Computing per-signal CPU at 52% util gave a
+wrong ~214 µs and a wrong "3.5x". A raw, socket-level pipelining blaster
+(`benchmark/rawblast.py`) **does** saturate the server, so these are real,
+server-bound numbers:
 
-\* The httpx load generator can't saturate the SSE server core (a `fetch` POST is
-far heavier client-side than a WS frame, and more concurrency just thrashed
-connections). So SSE's *absolute* ceiling is derived from the directly-measured
-per-signal CPU, not a saturation point: ~1 core / 214 µs ≈ **~4,700 signals/s/core**.
+| transport (full round-trip, 1 core saturated) | signals/s | **per-signal CPU** |
+|---|---|---|
+| **WS**                          | 16,150 | **~60 µs** |
+| **SSE+POST** (POST in + SSE out) | 9,480 | **~104 µs** |
+| *SSE+POST, ingestion only (no delivery)* | 10,400 | *~95 µs* |
 
-**Yes, there is a significant difference: WS costs ~60 µs/signal vs ~214 µs for
-optimized SSE+POST — about 3.5x.** A POST re-pays HTTP request parsing + ASGI
-`http.request`/`http.response` events + response build every message; a frame
-doesn't. So WS sustains ~3.5x the signalling rate per core (~16k vs ~4.7k/s).
+**Corrected finding: WS wins throughput-per-core by ~1.7x (≈104 vs 60 µs/signal),
+not 3.5x.** And the split is informative: **SSE delivery is nearly free (~10 µs)** —
+the whole gap is the cost of handling an HTTP *request* per message (parse + ASGI
+`http.request`/`http.response` events + response build, ~95 µs) versus a WS frame
+(~60 µs round-trip). That ~44 µs is the irreducible "HTTP-per-message" tax in a
+Python ASGI stack; a frame just carries less machinery.
 
-**Context that matters for the thesis:** even ~4,700 signals/s/core is huge for
-this workload — a WebRTC call setup is ~10 messages, so that's ~450 call-setups
-per second per core, then silence. The 3.5x only bites for *sustained* high-rate
-streams (live game state, cursors, telemetry), which is exactly the kind of app
-where WS earns its keep — and not what bursty signalling is. Honest caveat: the
-SSE ceiling is CPU-derived (couldn't be driven to saturation here); a
-multi-machine load test would pin the absolute number.
+So the real protocol limit, best case: **optimized SSE+POST sustains ~9,500
+signals/s/core vs WebSocket ~16,000 — within ~1.7x.** For context that's ~950
+WebRTC call-setups/sec/core (a call setup is ~10 messages), then silence — orders
+of magnitude above what bursty signalling needs. The 1.7x only bites for
+*sustained* high-rate streams (game state, cursors, telemetry). Honest caveat:
+all single-box; the WS ceiling is a true saturation point, the SSE ceiling too
+(raw blaster saturated it) — but a faster framework (Go/Rust) would lower both.
 
 ## What this does and does NOT compare
 
