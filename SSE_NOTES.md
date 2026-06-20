@@ -66,7 +66,7 @@ per-user info Ken read from the `channels_presence` DB tables (`user_name`,
 | `_all_but_me()`            | `_all_but_me()` (enqueue to each other queue)         |
 | `channel_layer.send(to)`   | `connections[to].put(...)`                            |
 | `_room_occupants()` (DB)   | `_occupants()` (reads `rooms` + `channel_meta`)       |
-| `self.channel_name`        | `channel_id` (random UUID, carried in a cookie)       |
+| `self.channel_name`        | `channel_id` (random UUID stored in the session)      |
 
 ## Files changed
 
@@ -115,20 +115,21 @@ These are the honest "tax" findings; with a WebSocket none of them exist.
    `X-CSRFToken` on all three endpoints (`api_post` in `client.js`). Stock
    Django CSRF middleware enforces it on the async views.
 
-2. **An explicit identity, carried in a cookie.** Channels handed Ken a
+2. **An explicit identity, stored in the session.** Channels handed Ken a
    `self.channel_name` for free, the *same* object across his WS
    `connect`/`receive`/`disconnect`. With independent HTTP requests there is no
-   such handle, so we mint a `channel_id` (UUID) on first SSE connect and set it
-   in its own cookie; every later POST reads it back to know who is calling.
-   (It is the routing key for direct signals and `_all_but_me` — a *public*
-   random id, distinct from the secret session id.) Reading a cookie needs no
-   DB, so the POST path stays sync-clean.
+   such handle, so we mint a `channel_id` (UUID) on first SSE connect and store
+   it in the DB session; every later POST re-reads it from the session to know
+   who is calling. (This is the routing key for direct signals and
+   `_all_but_me`.) Kept on the DB session deliberately: Ken's Channels stack hit
+   the session/presence DB per message, so the SSE+POST side does the same
+   per-request work — the benchmark must compare protocols, not skipped DB hits.
 
-3. **Async auth.** The user still has to be resolved per request to gate the
-   stream and label panels; we use Django 5's native `await request.auser()`.
-   Ken got `scope["user"]` pre-resolved by `AuthMiddlewareStack`. (Identity in
-   #2 used to ride Django's DB session, which forced an `sync_to_async` wrapper;
-   moving it to a cookie removed that — see the hyperspace pattern note below.)
+3. **Session/auth access from async views.** Reading the session is sync ORM,
+   illegal directly inside an async view, so it is wrapped in
+   `asgiref.sync.sync_to_async` (`_get_channel_id`). The user is fetched with
+   Django 5's native `await request.auser()`. Ken got `scope["user"]`
+   pre-resolved by `AuthMiddlewareStack`.
 
 4. **Reconnection idempotency.** htmx's SSE transport auto-reconnects. A WS
    "reconnect" was just a fresh `connect`. Here a fast reconnect can install a
@@ -158,15 +159,16 @@ These are the honest "tax" findings; with a WebSocket none of them exist.
    gone: presence is just the live SSE connection, and only the *server* sends
    keepalives (`:ka`). One fewer client→server chatter source.
 
-### Patterns borrowed from `scriptogre/hyperspace` (its FastAPI SSE reference)
+### Patterns checked against `scriptogre/hyperspace` (its FastAPI SSE reference)
 
-* **Cookie as the routing key.** hyperspace keys `sse_clients` by a plain
-  cookie token, not a server-side session. We did the same for `channel_id`,
-  which deleted the `sync_to_async` session dance (see cost #2/#3).
 * **Validated, not copied:** `dict[str, asyncio.Queue]` clients, a
   `wait_for(queue.get(), timeout=…)` keepalive loop, and the
   `Cache-Control: no-cache` + `X-Accel-Buffering: no` headers — already how this
   branch worked.
+* **Considered and rejected:** hyperspace keys `sse_clients` by a plain cookie
+  token instead of a server-side session. That would remove the `sync_to_async`
+  session read per POST — but Ken's WS side paid that DB cost, so dropping it
+  here would make the A/B unfair. We keep `channel_id` on the DB session.
 * **Deliberately not adopted:** hyperspace's zstd+base64 frame compression (a
   throughput optimization for its high-rate broadcast; signalling is low-volume)
   and its `services`/`schemas`/`dependencies` layering (over-engineering for
