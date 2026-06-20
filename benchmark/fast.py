@@ -109,3 +109,23 @@ async def stats_app(scope, receive, send):
     await send({'type': 'http.response.start', 'status': 200,
                 'headers': [(b'content-type', b'application/json')]})
     await send({'type': 'http.response.body', 'body': body})
+
+
+async def batch_app(scope, receive, send):
+    """One POST carrying many signals (JSON array). Amortizes the per-request
+    HTTP cost over N signals -- the lever for approaching WS throughput."""
+    token = None
+    for key, value in scope.get('headers', []):
+        if key == b'x-post-token':
+            token = value.decode()
+            break
+    channel_id = post_tokens.get(token)
+    if not channel_id:
+        await _reply(send, 403)
+        return
+    batch = json.loads(await _read_body(receive) or b'[]')
+    for rtc in batch:
+        await sse._do_signal(channel_id, rtc)
+    global signals
+    signals += len(batch)
+    await _reply(send, 204)

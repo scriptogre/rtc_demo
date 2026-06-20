@@ -25,6 +25,9 @@ async def application(scope, receive, send):
             await fast.stats_app(scope, receive, send)      # benchmark: signals handled
         elif path == '/fast/signal/':
             await fast.post_app(scope, receive, send)       # optimized POST (O(1) token)
+        elif path == '/fast/batch/':
+            await fast.batch_app(scope, receive, send)       # N signals per POST
+
         elif path.startswith('/raw/'):
             await raw_http(scope, receive, send)            # lean POST (session read, no middleware)
         else:

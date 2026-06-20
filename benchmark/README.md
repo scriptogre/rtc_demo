@@ -315,6 +315,54 @@ of magnitude above what bursty signalling needs. The 1.7x only bites for
 all single-box; the WS ceiling is a true saturation point, the SSE ceiling too
 (raw blaster saturated it) — but a faster framework (Go/Rust) would lower both.
 
+## Can SSE+POST get within ±10% of WS? (yes — what it takes)
+
+Validated the ingestion ceiling with three off-the-shelf tools (no custom code):
+bombardier 10,323, oha 10,254, h2load — all agree with `rawblast.py` (~10.4k),
+so the ~10k/s figure is solid.
+
+**One signal per POST cannot reach ±10%.** It's ~1.7x WS (≈9.5k full round-trip
+vs 16k) because an HTTP *request* is structurally heavier than a frame: a new ASGI
+scope, three event crossings (`http.request` / `http.response.start` /
+`http.response.body`), and status+header serialization — every message. No HTTP
+server removes that; a faster runtime (Go/Rust) lowers it but lowers WS too, so
+the ratio largely persists.
+
+**The lever is amortization: put N signals in one POST** (a JSON array). The
+per-request cost is paid once per N. Measured (bombardier, signals/s = reqs/s x N,
+one core; WS baseline 16,150):
+
+| signals per POST | signals/s/core | vs WS |
+|---|---|---|
+| 1  |  9,873 | 0.61x |
+| 3  | 24,943 | **1.54x** |
+| 5  | 40,210 | 2.5x |
+| 10 | 63,185 | 3.9x |
+| 20 | 92,222 | 5.7x |
+
+**So ±10% is reached at ~2 signals/POST, and exceeded from 3 up.** The deep
+reason: amortize the per-message transport cost and both transports converge to
+the same app-work floor (~11 µs/signal here for `_do_signal`); the frame-vs-request
+difference only exists *per message*. (WS can batch too, but its per-frame cost is
+already small, so it has less to gain — which is why batched SSE catches and
+passes it.)
+
+**What it costs / when it's honest:** batching trades a little latency for
+throughput (you accumulate signals for a few ms before sending). For WebRTC
+signalling this is a natural fit — ICE candidates arrive in bursts and batch
+cleanly; the latency-sensitive singletons (SDP offer/answer) are rare and can go
+unbatched. It's still standard SSE + HTTP POST, just a richer body — not a hack.
+
+**Verdict:** within ±10% of WS throughput-per-core is achievable, and beatable,
+with small (2-3) signal batches. At strict 1:1 messaging it is not possible in a
+Python ASGI stack (~1.7x floor) — but that floor is ~9.5k signals/s/core (~950
+WebRTC call-setups/s/core), already far beyond what bursty signalling needs, and
+latency is a tie on a real network regardless. A batch-free route to parity would
+be a streaming request body (one long-lived POST carrying framed signals,
+EventSource for the downlink) — that removes per-message request overhead
+entirely, but needs `fetch` upload streaming (Chrome/h2 only today), so it trades
+portability for parity.
+
 ## What this does and does NOT compare
 
 - **Does:** in-process WS vs in-process SSE+POST — a clean *transport* A/B. The
